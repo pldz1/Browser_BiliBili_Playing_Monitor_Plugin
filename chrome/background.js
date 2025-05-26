@@ -1,61 +1,63 @@
+// background.js
+// 后台脚本：定时检查已跟踪标签页的媒体播放并恢复
 let trackedTabs = new Set();
+const CHECK_INTERVAL = 1000; // 检查间隔：1秒
 
+// 注入到页面中执行的函数，用于恢复播放
+function checkMediaPlaybackAndResume() {
+  try {
+    document.querySelectorAll("audio, video").forEach((media) => {
+      if (media.paused) {
+        media.play().catch((err) => console.error("播放恢复失败:", err));
+      }
+    });
+  } catch (e) {
+    console.error("注入脚本异常:", e);
+  }
+}
+
+// 定时检查已跟踪的标签页
 function checkAllTabs() {
-  chrome.tabs.query({}, function (tabs) {
-    tabs.forEach((tab) => {
-      if (trackedTabs.has(tab.id)) {
-        if (tab.url.startsWith("http://") || tab.url.startsWith("https://")) {
+  chrome.tabs.query({}, (tabs) => {
+    try {
+      tabs
+        .filter(
+          (tab) => trackedTabs.has(tab.id) && /^https?:\/\//.test(tab.url)
+        )
+        .sort((a, b) => a.index - b.index) // 按真实标签顺序排序
+        .forEach((tab) => {
           chrome.scripting.executeScript(
-            {
-              target: { tabId: tab.id },
-              func: checkMediaPlaybackAndResume,
-            },
-            (results) => {
+            { target: { tabId: tab.id }, func: checkMediaPlaybackAndResume },
+            () => {
               if (chrome.runtime.lastError) {
-                console.error(chrome.runtime.lastError.message);
-              } else if (
-                results &&
-                results[0] &&
-                results[0].result !== undefined
-              ) {
-                console.log(`Tab ${tab.title}: ${results[0].result}`);
+                console.error(
+                  "脚本注入失败:",
+                  chrome.runtime.lastError.message
+                );
               }
             }
           );
-        }
-      }
-    });
+        });
+    } catch (e) {
+      console.error("检查标签页异常:", e);
+    }
   });
 }
 
-function checkMediaPlaybackAndResume() {
-  try {
-    let mediaElements = document.querySelectorAll("audio, video");
-    let resumed = false;
-    for (let media of mediaElements) {
-      if (media.paused) {
-        media.play();
-        resumed = true;
-      }
-      const mask = document.querySelector(".bili-mini-mask");
-      if (mask.style.display !== "none") {
-        mask.style.display = "none";
-      }
-    }
-    return resumed ? "Paused - Resumed" : "Playing";
-  } catch (error) {
-    console.error("Error resuming media playback:", error);
-    return "Error";
-  }
-}
-
+// 接收来自 popup 的消息，更新跟踪集合
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === "startTracking") {
-    trackedTabs.add(message.tabId);
-  } else if (message.action === "stopTracking") {
-    trackedTabs.delete(message.tabId);
+  try {
+    if (message.action === "toggleTrack" && typeof message.tabId === "number") {
+      if (message.enable) trackedTabs.add(message.tabId);
+      else trackedTabs.delete(message.tabId);
+      sendResponse({ success: true });
+    }
+  } catch (e) {
+    console.error("消息处理异常:", e);
+    sendResponse({ success: false, error: e.message });
   }
+  return true;
 });
 
-// 设置间隔1秒执行一次
-setInterval(checkAllTabs, 1000);
+// 启动定时任务
+setInterval(checkAllTabs, CHECK_INTERVAL);

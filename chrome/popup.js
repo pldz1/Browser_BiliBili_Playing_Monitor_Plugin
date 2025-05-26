@@ -1,139 +1,107 @@
-document.addEventListener("DOMContentLoaded", () => {
+// popup.js
+// 弹出页面脚本：展示标签页序号及标题，仅含音视频的标签页显示开关
+
+// 封装获取媒体存在性的函数，处理未注入错误
+async function getTabMediaInfo(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: "getStatus" }, async (resp) => {
+      if (chrome.runtime.lastError) {
+        // 未注入 content.js，则动态注入后重试
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ["content.js"],
+          });
+          chrome.tabs.sendMessage(tabId, { action: "getStatus" }, (resp2) => {
+            if (chrome.runtime.lastError) return resolve({ hasMedia: false });
+            resolve({ hasMedia: !!resp2.hasMedia });
+          });
+        } catch (e) {
+          resolve({ hasMedia: false });
+        }
+      } else {
+        resolve({ hasMedia: !!resp.hasMedia });
+      }
+    });
+  });
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
   const tabsContainer = document.getElementById("tabs");
-  tabsContainer.innerHTML = "<p>Loading...</p>";
+  const errorBox = document.getElementById("error");
+  tabsContainer.innerHTML = "<p>加载中...</p>";
 
   try {
-    chrome.tabs.query({}, (tabs) => {
-      const allTabs = [];
-      let tabsProcessed = 0;
+    let tabs = await chrome.tabs.query({});
+    if (!tabs || tabs.length === 0) {
+      tabsContainer.innerHTML = "<p>未发现标签页。</p>";
+      return;
+    }
 
-      if (tabs.length === 0) {
-        tabsContainer.innerHTML = "<p>No tabs found.</p>";
-        return;
-      }
+    tabs.sort((a, b) => a.index - b.index);
+    const { checkedTabs = {} } = await chrome.storage.local.get("checkedTabs");
+    tabsContainer.innerHTML = "";
 
-      // 获取已存储的勾选状态
-      chrome.storage.local.get("checkedTabs", (data) => {
-        const checkedTabs = data.checkedTabs || {};
+    for (let idx = 0; idx < tabs.length; idx++) {
+      const tab = tabs[idx];
+      const { hasMedia } = await getTabMediaInfo(tab.id);
 
-        tabs.forEach((tab) => {
-          if (tab.url.startsWith("http://") || tab.url.startsWith("https://")) {
-            chrome.scripting.executeScript(
-              {
-                target: { tabId: tab.id },
-                func: checkMediaPlayback,
-              },
-              (results) => {
-                tabsProcessed++;
-                if (chrome.runtime.lastError) {
-                  console.error(chrome.runtime.lastError.message);
-                } else if (results && results[0]) {
-                  let status;
-                  if (results[0].result === "playing") {
-                    status = "Playing";
-                  } else if (results[0].result === "paused") {
-                    status = "Paused";
-                  } else {
-                    status = "No Media";
-                  }
-                  allTabs.push({
-                    id: tab.id,
-                    title: tab.title,
-                    url: tab.url,
-                    status: status,
-                  });
-                }
+      const div = document.createElement("div");
+      div.className = "tab";
 
-                if (tabsProcessed === tabs.length) {
-                  displayTabs(allTabs, checkedTabs);
-                }
-              }
+      // 左侧：序号 & 标题
+      const left = document.createElement("div");
+      left.className = "tab-left";
+      const num = document.createElement("span");
+      num.className = "tab-number";
+      num.textContent = idx + 1;
+      const info = document.createElement("div");
+      info.className = "tab-info";
+      info.textContent = tab.title || tab.url;
+      left.append(num, info);
+
+      // 右侧：仅有媒体时显示开关
+      const right = document.createElement("div");
+      right.className = "tab-right";
+      if (hasMedia) {
+        const label = document.createElement("label");
+        label.className = "switch";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = !!checkedTabs[tab.id];
+        const slider = document.createElement("span");
+        slider.className = "slider";
+        label.append(checkbox, slider);
+        checkbox.addEventListener("change", async (e) => {
+          try {
+            await new Promise((res) =>
+              chrome.runtime.sendMessage(
+                {
+                  action: "toggleTrack",
+                  tabId: tab.id,
+                  enable: e.target.checked,
+                },
+                res
+              )
             );
-          } else {
-            tabsProcessed++;
-            if (tabsProcessed === tabs.length) {
-              displayTabs(allTabs, checkedTabs);
-            }
+            const newChecked = { ...checkedTabs };
+            if (e.target.checked) newChecked[tab.id] = true;
+            else delete newChecked[tab.id];
+            await chrome.storage.local.set({ checkedTabs: newChecked });
+          } catch {
+            errorBox.textContent = "操作失败，请重试。";
+            errorBox.style.display = "block";
           }
         });
-      });
-    });
-  } catch (error) {
-    console.error("Error initializing extension:", error);
-    tabsContainer.innerHTML =
-      "<p>Failed to load tabs. Please try again later.</p>";
-  }
-
-  function checkMediaPlayback() {
-    const mediaElements = document.querySelectorAll("audio, video");
-    for (let media of mediaElements) {
-      if (!media.paused && !media.ended && media.readyState > 2) {
-        return "playing";
+        right.append(label);
       }
+
+      div.append(left, right);
+      tabsContainer.append(div);
     }
-    return mediaElements.length > 0 ? "paused" : "no media";
-  }
-
-  function shouldShowSwitch(url) {
-    const disallowedUrls = ["https://www.bilibili.com/"];
-
-    return !disallowedUrls.includes(url);
-  }
-
-  function displayTabs(tabs, checkedTabs) {
+  } catch (err) {
+    errorBox.textContent = "加载失败，请刷新。";
+    errorBox.style.display = "block";
     tabsContainer.innerHTML = "";
-    if (tabs.length === 0) {
-      tabsContainer.innerHTML = "<p>No tabs found.</p>";
-    } else {
-      tabs.forEach((tab) => {
-        const tabElement = document.createElement("div");
-        tabElement.className = "tab";
-        const showSwitch =
-          tab.status !== "No Media" && shouldShowSwitch(tab.url);
-        const isChecked = checkedTabs[tab.id] || false;
-        tabElement.innerHTML = `
-          <span class="tab-info">Tab: ${tab.title} - URL: ${
-          tab.url
-        } - Status: ${tab.status}</span>
-          ${
-            showSwitch
-              ? `
-            <label class="switch">
-              <input type="checkbox" ${
-                isChecked ? "checked" : ""
-              } data-tab-id="${tab.id}">
-              <span class="slider round"></span>
-            </label>
-          `
-              : ""
-          }
-        `;
-        tabsContainer.appendChild(tabElement);
-
-        if (showSwitch) {
-          const switchElement = tabElement.querySelector(
-            ".switch input[type='checkbox']"
-          );
-          switchElement.addEventListener("change", (event) => {
-            const tabId = parseInt(event.target.getAttribute("data-tab-id"));
-            const action = event.target.checked
-              ? "startTracking"
-              : "stopTracking";
-
-            chrome.storage.local.get("checkedTabs", (data) => {
-              const checkedTabs = data.checkedTabs || {};
-              if (event.target.checked) {
-                checkedTabs[tabId] = true;
-              } else {
-                delete checkedTabs[tabId];
-              }
-              chrome.storage.local.set({ checkedTabs: checkedTabs });
-            });
-
-            chrome.runtime.sendMessage({ action: action, tabId: tabId });
-          });
-        }
-      });
-    }
   }
 });
